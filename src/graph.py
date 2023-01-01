@@ -1,4 +1,6 @@
+from dataclasses import dataclass
 from typing import Tuple, Callable
+import itertools
 from operator import __gt__, __lt__
 import matplotlib.pyplot as plt
 import numpy as np
@@ -11,19 +13,14 @@ try:
     p = Serial("/dev/ttyACM0", baudrate=115200, timeout=0)
 except:
     p = Serial("/dev/ttyACM1", baudrate=115200, timeout=0)
-QUEUE_COUNT = 5
+QUEUE_COUNT = 4
 QUEUE_LENGTH = 500
 HEIGHT = 4095
 X_DATA = range(QUEUE_LENGTH)
-sensor_queues = [collections.deque(np.zeros(QUEUE_LENGTH)) for _ in range(QUEUE_COUNT)]
-color_list = 'rgbmy'
-segments = len(color_list) * 2 + 1
-color_vertical_pos = {c: i + len(color_list) + 2 for i, c in enumerate(color_list)}
+color_list = "rgbm"
 
-fig = plt.figure(figsize=(12, 6))
-ax = plt.subplot(1, 1, 1)
-
-ax.set_ylim(0, HEIGHT)
+fig, axs = plt.subplots(1, 1)
+# axs = itertools.chain.from_iterable(axs)
 
 
 def search_algo(
@@ -46,19 +43,66 @@ def find_max(q: collections.deque) -> Tuple[int, int]:
     return search_algo(q, __lt__)
 
 
-def draw_queue(q: collections.deque, color: str):
-    ax.plot(X_DATA, q, color)
-    min_i, min_v = find_min(q)
-    max_i, max_v = find_max(q)
-    ax.text(min_i, min_v, min_v, fontsize=12, c=color)
-    ax.text(max_i, max_v, max_v, fontsize=12, c=color)
-    ax.text(
-        0,
-        color_vertical_pos.get(color) * HEIGHT // segments,
-        sum(q) / QUEUE_LENGTH,
-        fontsize=12,
-        c=color,
-    )
+@dataclass
+class LogEntry:
+    sensor_value: int
+    vcc: int
+
+    def __lt__(self, other):
+        return self.sensor_value < other.sensor_value
+
+    def __gt__(self, other):
+        return self.sensor_value > other.sensor_value
+
+
+def parse_log_entry(raw: str) -> LogEntry:
+    sensor_value, vcc = raw.split("|")
+    return LogEntry(int(sensor_value), int(vcc))
+
+
+class SesnorLog:
+    def __init__(self, ax, color, avg_pos=HEIGHT * 7 / 8, queue_length=QUEUE_LENGTH):
+        self._queue = collections.deque(((0, 0),) * queue_length)
+        self._ax = ax
+        self._color = color
+        self._avg_pos = avg_pos
+
+    def push(self, item: LogEntry):
+        self._queue.popleft()
+        self._queue.append((item.sensor_value, item.vcc))
+
+    def min(self) -> LogEntry:
+        return find_min(self._queue)
+
+    def max(self) -> LogEntry:
+        return find_max(self._queue)
+
+    def draw(self):
+        self._ax.plot(X_DATA, self._queue, self._color)
+        min_i, min_v = self.min()
+        max_i, max_v = self.max()
+        self._ax.text(min_i, min_v[0], min_v, fontsize=12, c=self._color)
+        self._ax.text(max_i, max_v[0], max_v, fontsize=12, c=self._color)
+        self._ax.text(
+            0,
+            self._avg_pos,
+            sum(i[0] for i in self._queue) / QUEUE_LENGTH,
+            fontsize=12,
+            c=self._color,
+        )
+        self._ax.text(
+            QUEUE_LENGTH - 20,
+            self._avg_pos,
+            sum(i[1] for i in self._queue) / QUEUE_LENGTH,
+            fontsize=12,
+            c="k",
+        )
+        self._ax.set_ylim(0, HEIGHT)
+        self._ax.set_autoscale_on(False)
+
+
+# sensor_queues = [SesnorLog(ax, c) for ax, c in zip(axs, color_list)]
+sensor_queues = [SesnorLog(axs, c) for c in color_list]
 
 
 def frame(i):
@@ -75,25 +119,21 @@ def frame(i):
         except:
             return
         data_lines = p.readlines()
-    
+
     for line in data_lines:
         try:
             line = line.decode("ascii")
             values = line.split(",")
-            values = [int(v) for v in values if int(v) > 100]
             if len(values) != QUEUE_COUNT:
                 continue
             for queue, new_value in zip(sensor_queues, values):
-                queue.popleft()
-                queue.append(new_value)
+                parsed = parse_log_entry(new_value)
+                queue.push(parsed)
         except (UnicodeDecodeError, ValueError) as e:
             print(e)
-
-    ax.cla()
-    for q, c in zip(sensor_queues, color_list):
-        draw_queue(q, c)
-    ax.set_ylim(0, HEIGHT)
-    ax.set_autoscale_on(False)
+    axs.cla()
+    for q in sensor_queues:
+        q.draw()
 
 
 ani = FuncAnimation(fig, frame, interval=130)
